@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ATLAS">
+<meta name="theme-color" content="#0a0e17">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>ATLAS Trading</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+:root{--bg:#0a0e17;--card:#111827;--border:#1e293b;--text:#e2e8f0;--muted:#64748b;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--purple:#8b5cf6;--blue:#1e3a5f}
+@font-face{font-family:'JBM';src:url('https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxTOlOV.woff2') format('woff2');font-weight:400 800;font-display:swap}
+body{background:var(--bg);color:var(--text);font-family:'JBM','SF Mono','Fira Code',monospace;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+.hide-scroll::-webkit-scrollbar{display:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideR{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
+.fade-up{animation:fadeUp .35s ease both}
+.slide-r{animation:slideR .3s ease both}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.10.3/Recharts.min.js"></script>
+
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef}=React;
+const {AreaChart,Area,XAxis,YAxis,CartesianGrid,Tooltip,ResponsiveContainer,BarChart,Bar}=Recharts;
+
+const PAIRS=[
+  {pair:'XBTUSD',name:'Bitcoin',sym:'BTC',color:'#f7931a'},
+  {pair:'XRPUSD',name:'XRP',sym:'XRP',color:'#00aaee'},
+  {pair:'ADAUSD',name:'Cardano',sym:'ADA',color:'#0033ad'},
+];
+
+const STOCKS=['AAPL','MSFT','NVDA','AMD','AMZN','GOOGL','META','TSLA'];
+const TF_MAP={'1h':60,'4h':240,'1d':1440};
+
+function fmt(n,d=2){return n==null?'—':Number(n).toLocaleString('de-DE',{minimumFractionDigits:d,maximumFractionDigits:d})}
+function usd(n){return n==null?'—':'$'+fmt(n)}
+function pct(n){return n==null?'—':(n>=0?'+':'')+n.toFixed(2)+'%'}
+function ago(ts){const m=Math.floor((Date.now()-new Date(ts).getTime())/60000);if(m<1)return'jetzt';if(m<60)return m+'m';const h=Math.floor(m/60);return h<24?h+'h':Math.floor(h/24)+'d'}
+
+function rsi(closes,p=14){
+  if(closes.length<p+1)return null;
+  let g=0,l=0;
+  for(let i=closes.length-p;i<closes.length;i++){const d=closes[i]-closes[i-1];d>0?g+=d:l+=Math.abs(d)}
+  g/=p;l/=p;if(l===0)return 100;return 100-100/(1+g/l);
+}
+
+function App(){
+  const [tab,setTab]=useState('dash');
+  const [prices,setPrices]=useState({});
+  const [ohlc,setOhlc]=useState({});
+  const [sel,setSel]=useState('XBTUSD');
+  const [tf,setTf]=useState('4h');
+  const [last,setLast]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [history,setHistory]=useState([]);
+
+  const fetchPrices=useCallback(async()=>{
+    const r={};
+    for(const a of PAIRS){
+      try{
+        const resp=await fetch('https://api.kraken.com/0/public/Ticker?pair='+a.pair);
+        const data=await resp.json();
+        if(data.result){
+          const k=Object.keys(data.result)[0];
+          const t=data.result[k];
+          r[a.pair]={
+            price:parseFloat(t.c[0]),
+            high:parseFloat(t.h[1]),
+            low:parseFloat(t.l[1]),
+            vol:parseFloat(t.v[1]),
+            chg:((parseFloat(t.c[0])-parseFloat(t.o))/parseFloat(t.o)*100),
+            open:parseFloat(t.o)
+          };
+        }
+      }catch(e){}
+    }
+    setPrices(r);
+    setLast(new Date().toISOString());
+    setLoading(false);
+
+    setHistory(prev=>{
+      const entry={t:Date.now(),...Object.fromEntries(Object.entries(r).map(([k,v])=>[k,v.price]))};
+      return[...prev,entry].slice(-200);
+    });
+  },[]);
+
+  const fetchOHLC=useCallback(async(pair,interval=240)=>{
+    try{
+      const resp=await fetch('https://api.kraken.com/0/public/OHLC?pair='+pair+'&interval='+interval);
+      const data=await resp.json();
+      if(data.result){
+        const k=Object.keys(data.result).filter(x=>x!=='last')[0];
+        const candles=data.result[k].slice(-80).map(c=>({
+          ts:c[0],
+          time:new Date(c[0]*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'}),
+          timeShort:new Date(c[0]*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'}),
+          o:parseFloat(c[1]),h:parseFloat(c[2]),l:parseFloat(c[3]),c:parseFloat(c[4]),v:parseFloat(c[6])
+        }));
+        setOhlc(prev=>({...prev,[pair]:candles}));
+      }
+    }catch(e){}
+  },[]);
+
+  useEffect(()=>{
+    fetchPrices();
+    PAIRS.forEach(a=>fetchOHLC(a.pair,240));
+    const iv=setInterval(fetchPrices,20000);
+    return()=>clearInterval(iv);
+  },[fetchPrices,fetchOHLC]);
+
+  const getRsi=(pair,p=14)=>{const c=ohlc[pair];if(!c)return null;return rsi(c.map(x=>x.c),p);};
+
+  const signals=PAIRS.map(a=>{
+    const r14=getRsi(a.pair,14),r7=getRsi(a.pair,7),p=prices[a.pair];
+    if(!r14||!r7||!p)return null;
+    if(r7<20&&r14<40)return{...a,signal:'LONG',r14,r7,conf:r7<15?'HIGH':'MEDIUM'};
+    if(r7>80&&r14>60)return{...a,signal:'SHORT',r14,r7,conf:r7>85?'HIGH':'MEDIUM'};
+    return null;
+  }).filter(Boolean);
+
+  const selectAsset=(pair)=>{setSel(pair);setTab('chart');fetchOHLC(pair,TF_MAP[tf]||240);};
+  const changeTf=(t)=>{setTf(t);fetchOHLC(sel,TF_MAP[t]||240);};
+
+  // ─── HEADER ───
+  const Header=()=>(
+    <div style={{background:'linear-gradient(180deg,#0f1724,#0a0e17)',borderBottom:'1px solid var(--border)',padding:'env(safe-area-inset-top, 8px) 16px 8px',position:'sticky',top:0,zIndex:100,backdropFilter:'blur(20px)'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:28,height:28,borderRadius:7,background:'linear-gradient(135deg,#3b82f6,#8b5cf6)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,fontWeight:800,color:'#fff'}}>A</div>
+          <div>
+            <div style={{fontSize:13,fontWeight:800,letterSpacing:2,color:'#f8fafc'}}>ATLAS</div>
+          </div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <div style={{width:7,height:7,borderRadius:'50%',background:loading?'var(--yellow)':'var(--green)',boxShadow:'0 0 8px '+(loading?'var(--yellow)':'var(--green)'),animation:'pulse 2s infinite'}}/>
+          <span style={{fontSize:9,color:'var(--muted)'}}>{last?ago(last):'...'}</span>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ─── NAV ───
+  const Nav=()=>(
+    <div style={{position:'fixed',bottom:0,left:0,right:0,background:'#0f1724ee',backdropFilter:'blur(20px)',borderTop:'1px solid var(--border)',padding:'6px 0 env(safe-area-inset-bottom, 6px)',zIndex:100,display:'flex',justifyContent:'space-around'}}>
+      {[
+        {id:'dash',icon:'◉',label:'Dashboard'},
+        {id:'chart',icon:'◈',label:'Charts'},
+        {id:'signal',icon:'⚡',label:'Signale'},
+        {id:'sys',icon:'⚙',label:'System'},
+      ].map(t=>(
+        <button key={t.id} onClick={()=>setTab(t.id)} style={{
+          background:'none',border:'none',cursor:'pointer',padding:'6px 0',width:70,
+          display:'flex',flexDirection:'column',alignItems:'center',gap:2,
+          color:tab===t.id?'var(--accent)':'var(--muted)',transition:'all .2s',
+        }}>
+          <span style={{fontSize:18}}>{t.icon}</span>
+          <span style={{fontSize:8,fontWeight:700,letterSpacing:.5,fontFamily:'inherit'}}>{t.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+
+  // ─── PRICE CARD ───
+  const PriceCard=({asset,idx})=>{
+    const p=prices[asset.pair];
+    const r=getRsi(asset.pair);
+    const candles=(ohlc[asset.pair]||[]).slice(-24);
+    const up=p&&p.chg>=0;
+    return(
+      <div onClick={()=>selectAsset(asset.pair)} className="slide-r" style={{
+        background:'var(--card)',borderRadius:14,padding:14,
+        border:'1px solid var(--border)',cursor:'pointer',
+        animationDelay:idx*80+'ms',transition:'border-color .2s',
+      }}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+          <div style={{display:'flex',alignItems:'center',gap:6}}>
+            <div style={{width:24,height:24,borderRadius:6,background:asset.color+'22',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:800,color:asset.color}}>{asset.sym[0]}</div>
+            <div>
+              <div style={{fontSize:13,fontWeight:800,color:'#f8fafc'}}>{asset.sym}</div>
+            </div>
+          </div>
+          {r!=null&&<div style={{fontSize:8,padding:'2px 5px',borderRadius:4,background:r<30?'var(--green)':r>70?'var(--red)':'var(--muted)',color:'#fff',fontWeight:800,opacity:.8}}>RSI {r.toFixed(0)}</div>}
+        </div>
+        <div style={{fontSize:20,fontWeight:800,color:'#f8fafc',marginBottom:2}}>{p?usd(p.price):'—'}</div>
+        <div style={{fontSize:11,fontWeight:700,color:up?'var(--green)':'var(--red)'}}>{p?pct(p.chg):'—'}</div>
+        {candles.length>3&&(
+          <div style={{height:36,marginTop:6}}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={candles.map(c=>({p:c.c}))}>
+                <defs><linearGradient id={'g'+asset.pair} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={up?'var(--green)':'var(--red)'} stopOpacity={.3}/>
+                  <stop offset="100%" stopColor={up?'var(--green)':'var(--red)'} stopOpacity={0}/>
+                </linearGradient></defs>
+                <Area type="monotone" dataKey="p" stroke={up?'var(--green)':'var(--red)'} fill={'url(#g'+asset.pair+')'} strokeWidth={1.5} dot={false}/>
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ─── DASHBOARD TAB ───
+  const DashTab=()=>(
+    <div className="fade-up" style={{padding:'12px 16px 90px'}}>
+      {/* Portfolio */}
+      <div style={{background:'linear-gradient(135deg,#1e293b,#0f172a)',borderRadius:14,padding:16,marginBottom:14,border:'1px solid var(--blue)'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+          <div>
+            <div style={{fontSize:9,color:'var(--muted)',letterSpacing:1,marginBottom:2}}>PORTFOLIO</div>
+            <div style={{fontSize:28,fontWeight:800,color:'#f8fafc'}}>$100,000</div>
+          </div>
+          <div style={{padding:'4px 10px',borderRadius:20,fontSize:9,fontWeight:800,background:'var(--green)',color:'#fff',opacity:.15,border:'1px solid var(--green)'}}>
+            <span style={{opacity:7}}>PAPER</span>
+          </div>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginTop:12}}>
+          {[
+            {l:'Day P&L',v:'$0',c:'var(--muted)'},
+            {l:'Positionen',v:'0',c:'var(--accent)'},
+            {l:'Buying Power',v:'$200K',c:'var(--purple)'},
+          ].map((x,i)=>(
+            <div key={i}><div style={{fontSize:8,color:'var(--muted)',letterSpacing:.5}}>{x.l}</div><div style={{fontSize:14,fontWeight:700,color:x.c,marginTop:1}}>{x.v}</div></div>
+          ))}
+        </div>
+      </div>
+
+      {/* Price Cards */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr',gap:10,marginBottom:14}}>
+        {PAIRS.map((a,i)=><PriceCard key={a.pair} asset={a} idx={i}/>)}
+      </div>
+
+      {/* Signals */}
+      <div style={{background:'var(--card)',borderRadius:14,padding:14,border:'1px solid var(--border)',marginBottom:14}}>
+        <div style={{fontSize:10,color:'var(--muted)',letterSpacing:1,marginBottom:10,fontWeight:700}}>⚡ SIGNALE</div>
+        {signals.length===0?(
+          <div style={{color:'#475569',fontSize:11,padding:'8px 0'}}>Keine aktiven Signale — Markt neutral</div>
+        ):signals.map((s,i)=>(
+          <div key={i} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 10px',background:'#0f172a',borderRadius:8,marginBottom:4,border:'1px solid '+(s.signal==='LONG'?'var(--green)':'var(--red)')+'30'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <div style={{padding:'2px 6px',borderRadius:4,fontSize:9,fontWeight:800,background:s.signal==='LONG'?'var(--green)22':'var(--red)22',color:s.signal==='LONG'?'var(--green)':'var(--red)'}}>{s.signal}</div>
+              <span style={{fontWeight:700,fontSize:12}}>{s.sym}</span>
+            </div>
+            <div style={{fontSize:9,color:'var(--muted)'}}>RSI7:{s.r7.toFixed(0)} · {s.conf}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Scanner Status */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+        <div style={{background:'var(--card)',borderRadius:12,padding:12,border:'1px solid var(--border)'}}>
+          <div style={{fontSize:9,color:'var(--muted)',letterSpacing:1,fontWeight:700,marginBottom:6}}>ATLAS · STOCKS</div>
+          <div style={{fontSize:10,color:'#94a3b8'}}>30 Ticker · 2min</div>
+          <div style={{fontSize:10,color:'#94a3b8'}}>Auto-Trading ✓</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:2,marginTop:6}}>
+            {STOCKS.slice(0,6).map(t=><span key={t} style={{fontSize:7,padding:'1px 3px',borderRadius:2,background:'var(--border)',color:'var(--muted)'}}>{t}</span>)}
+          </div>
+        </div>
+        <div style={{background:'var(--card)',borderRadius:12,padding:12,border:'1px solid var(--border)'}}>
+          <div style={{fontSize:9,color:'var(--muted)',letterSpacing:1,fontWeight:700,marginBottom:6}}>LANECORE · CRYPTO</div>
+          <div style={{fontSize:10,color:'#94a3b8'}}>3 Paare · 4h</div>
+          <div style={{fontSize:10,color:'#94a3b8'}}>Telegram Alerts</div>
+          <div style={{display:'flex',gap:3,marginTop:6}}>
+            {PAIRS.map(a=><span key={a.pair} style={{fontSize:7,padding:'1px 4px',borderRadius:2,background:a.color+'22',color:a.color,fontWeight:700}}>{a.sym}</span>)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ─── CHART TAB ───
+  const ChartTab=()=>{
+    const p=prices[sel];
+    const candles=(ohlc[sel]||[]).slice(-60);
+    const asset=PAIRS.find(a=>a.pair===sel);
+    const r14=getRsi(sel,14);
+    const r7=getRsi(sel,7);
+    const up=p&&p.chg>=0;
+
+    return(
+      <div className="fade-up" style={{padding:'12px 16px 90px'}}>
+        {/* Asset Selector */}
+        <div style={{display:'flex',gap:6,marginBottom:12,overflowX:'auto'}} className="hide-scroll">
+          {PAIRS.map(a=>(
+            <button key={a.pair} onClick={()=>{setSel(a.pair);fetchOHLC(a.pair,TF_MAP[tf]);}} style={{
+              padding:'7px 14px',borderRadius:8,border:'none',cursor:'pointer',
+              fontSize:11,fontFamily:'inherit',fontWeight:700,whiteSpace:'nowrap',
+              background:sel===a.pair?'var(--accent)':'var(--border)',
+              color:sel===a.pair?'#fff':'#94a3b8',transition:'all .2s',
+            }}>{a.sym}</button>
+          ))}
+          <div style={{flex:1}}/>
+          {['1h','4h','1d'].map(t=>(
+            <button key={t} onClick={()=>changeTf(t)} style={{
+              padding:'7px 10px',borderRadius:8,border:'none',cursor:'pointer',
+              fontSize:10,fontFamily:'inherit',fontWeight:600,
+              background:tf===t?'var(--border)':'transparent',
+              color:tf===t?'#f8fafc':'var(--muted)',
+            }}>{t}</button>
+          ))}
+        </div>
+
+        {/* Price */}
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:9,color:'var(--muted)',letterSpacing:1}}>{asset?.name}</div>
+          <div style={{display:'flex',alignItems:'baseline',gap:10}}>
+            <span style={{fontSize:28,fontWeight:800,color:'#f8fafc'}}>{p?usd(p.price):'—'}</span>
+            <span style={{fontSize:13,fontWeight:700,color:up?'var(--green)':'var(--red)'}}>{p?pct(p.chg):'—'}</span>
+          </div>
+        </div>
+
+        {/* Main Chart */}
+        <div style={{background:'var(--card)',borderRadius:14,padding:'12px 8px 12px 0',border:'1px solid var(--border)',marginBottom:12}}>
+          <div style={{height:220}}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={candles}>
+                <defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="var(--accent)" stopOpacity={.25}/>
+                  <stop offset="100%" stopColor="var(--accent)" stopOpacity={0}/>
+                </linearGradient></defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b"/>
+                <XAxis dataKey="timeShort" tick={{fill:'#475569',fontSize:8}} axisLine={false} tickLine={false} interval="preserveStartEnd"/>
+                <YAxis domain={['auto','auto']} tick={{fill:'#475569',fontSize:8}} axisLine={false} tickLine={false} width={55} tickFormatter={v=>fmt(v,0)}/>
+                <Tooltip contentStyle={{background:'#1e293b',border:'1px solid #334155',borderRadius:8,fontSize:10,fontFamily:'inherit'}} formatter={v=>[usd(v),'Preis']}/>
+                <Area type="monotone" dataKey="c" stroke="var(--accent)" fill="url(#cg)" strokeWidth={2} dot={false}/>
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Volume */}
+        <div style={{background:'var(--card)',borderRadius:12,padding:'8px 8px 8px 0',border:'1px solid var(--border)',marginBottom:12}}>
+          <div style={{fontSize:8,color:'var(--muted)',letterSpacing:1,fontWeight:700,paddingLeft:12,marginBottom:4}}>VOLUME</div>
+          <div style={{height:60}}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={candles}>
+                <XAxis dataKey="timeShort" tick={false} axisLine={false}/>
+                <YAxis tick={false} axisLine={false} width={10}/>
+                <Bar dataKey="v" fill="#3b82f640" radius={[2,2,0,0]}/>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Indicators */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>
+          {[
+            {l:'RSI(14)',v:r14?r14.toFixed(1):'—',c:r14&&r14<30?'var(--green)':r14&&r14>70?'var(--red)':'var(--accent)'},
+            {l:'RSI(7)',v:r7?r7.toFixed(1):'—',c:r7&&r7<25?'var(--green)':r7&&r7>75?'var(--red)':'var(--accent)'},
+            {l:'24h High',v:p?fmt(p.high):'—',c:'var(--green)'},
+            {l:'24h Low',v:p?fmt(p.low):'—',c:'var(--red)'},
+          ].map((x,i)=>(
+            <div key={i} style={{background:'var(--card)',borderRadius:10,padding:10,border:'1px solid var(--border)'}}>
+              <div style={{fontSize:7,color:'var(--muted)',letterSpacing:.5}}>{x.l}</div>
+              <div style={{fontSize:14,fontWeight:700,color:x.c,marginTop:2}}>{x.v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── SIGNALS TAB ───
+  const SignalTab=()=>(
+    <div className="fade-up" style={{padding:'12px 16px 90px'}}>
+      <div style={{background:'var(--card)',borderRadius:14,padding:14,border:'1px solid var(--border)',marginBottom:14}}>
+        <div style={{fontSize:10,color:'var(--muted)',letterSpacing:1,marginBottom:12,fontWeight:700}}>SIGNAL SCANNER — LIVE</div>
+        {PAIRS.map((a,idx)=>{
+          const r14=getRsi(a.pair,14),r7=getRsi(a.pair,7),p=prices[a.pair];
+          let sig='NEUTRAL',sc='var(--muted)';
+          if(r14&&r14<30){sig='OVERSOLD';sc='var(--green)'}
+          if(r14&&r14>70){sig='OVERBOUGHT';sc='var(--red)'}
+          if(r7&&r7<20&&r14&&r14<40){sig='⚡ LONG';sc='var(--green)'}
+          if(r7&&r7>80&&r14&&r14>60){sig='⚡ SHORT';sc='var(--red)'}
+
+          return(
+            <div key={a.pair} className="slide-r" style={{
+              display:'flex',alignItems:'center',justifyContent:'space-between',
+              padding:'12px 0',borderBottom:idx<PAIRS.length-1?'1px solid var(--border)':'none',
+              animationDelay:idx*60+'ms',
+            }}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <div style={{width:28,height:28,borderRadius:7,background:a.color+'22',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:800,color:a.color}}>{a.sym[0]}</div>
+                <div>
+                  <div style={{fontSize:12,fontWeight:700}}>{a.sym}</div>
+                  <div style={{fontSize:10,color:'var(--muted)'}}>{p?usd(p.price):'—'}</div>
+                </div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:10,fontWeight:700,color:sc}}>{sig}</div>
+                <div style={{fontSize:9,color:'var(--muted)'}}>
+                  R14:{r14?r14.toFixed(0):'—'} · R7:{r7?r7.toFixed(0):'—'}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Strategy Info */}
+      <div style={{background:'var(--card)',borderRadius:14,padding:14,border:'1px solid var(--border)'}}>
+        <div style={{fontSize:10,color:'var(--muted)',letterSpacing:1,marginBottom:10,fontWeight:700}}>MEAN REVERSION STRATEGIE</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+          <div>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--green)',marginBottom:4}}>LONG</div>
+            <div style={{fontSize:10,color:'#94a3b8',lineHeight:1.8}}>
+              RSI(7) &lt; 20<br/>RSI(14) &lt; 40<br/>Grüne Kerze<br/>Close &gt; Prev Close
+            </div>
+          </div>
+          <div>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--red)',marginBottom:4}}>SHORT</div>
+            <div style={{fontSize:10,color:'#94a3b8',lineHeight:1.8}}>
+              RSI(7) &gt; 80<br/>RSI(14) &gt; 60<br/>Rote Kerze<br/>Close &lt; Prev Close
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ─── SYSTEM TAB ───
+  const SysTab=()=>(
+    <div className="fade-up" style={{padding:'12px 16px 90px'}}>
+      <div style={{background:'var(--card)',borderRadius:14,padding:14,border:'1px solid var(--border)',marginBottom:14}}>
+        <div style={{fontSize:10,color:'var(--muted)',letterSpacing:1,marginBottom:12,fontWeight:700}}>WORKFLOWS</div>
+        {[
+          {n:'WF0 – Intelligence',s:'14:00 MEZ Mo-Fr'},
+          {n:'WF1 – Market Scanner',s:'Alle 2 Min'},
+          {n:'WF2 – Telegram Cmds',s:'Webhook'},
+          {n:'WF3 – Position Monitor',s:'Alle 2 Min'},
+          {n:'WF4 – Daily Report',s:'1x täglich'},
+          {n:'WF5 – Watchdog',s:'Alle 30 Min'},
+          {n:'LaneCore Scanner',s:'Alle 4h'},
+        ].map((w,i)=>(
+          <div key={i} className="slide-r" style={{
+            display:'flex',justifyContent:'space-between',alignItems:'center',
+            padding:'10px 0',borderBottom:i<6?'1px solid var(--border)':'none',
+            animationDelay:i*40+'ms',
+          }}>
+            <div>
+              <div style={{fontSize:11,fontWeight:600,color:'#f8fafc'}}>{w.n}</div>
+              <div style={{fontSize:9,color:'var(--muted)'}}>{w.s}</div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:4,padding:'2px 8px',borderRadius:20,background:'var(--green)15',border:'1px solid var(--green)30'}}>
+              <div style={{width:5,height:5,borderRadius:'50%',background:'var(--green)',animation:'pulse 2s infinite'}}/>
+              <span style={{fontSize:8,fontWeight:700,color:'var(--green)'}}>AKTIV</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{background:'var(--card)',borderRadius:14,padding:14,border:'1px solid var(--border)',marginBottom:14}}>
+        <div style={{fontSize:10,color:'var(--muted)',letterSpacing:1,marginBottom:12,fontWeight:700}}>API VERBINDUNGEN</div>
+        {[
+          {n:'Alpaca Trading',d:'Paper PA31TORWGZC1',e:'📊'},
+          {n:'Alpaca Data',d:'US Stocks Realtime',e:'📈'},
+          {n:'Kraken',d:'Crypto OHLC',e:'🔷'},
+          {n:'Finnhub',d:'News & Earnings',e:'📰'},
+          {n:'Claude AI',d:'Sonnet 4.5',e:'🧠'},
+          {n:'Telegram',d:'ATLAS Trading Group',e:'💬'},
+        ].map((a,i)=>(
+          <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderBottom:i<5?'1px solid var(--border)':'none'}}>
+            <span style={{fontSize:14}}>{a.e}</span>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,fontWeight:600,color:'#f8fafc'}}>{a.n}</div>
+              <div style={{fontSize:9,color:'var(--muted)'}}>{a.d}</div>
+            </div>
+            <div style={{width:6,height:6,borderRadius:'50%',background:'var(--green)'}}/>
+          </div>
+        ))}
+      </div>
+
+      <div style={{background:'var(--card)',borderRadius:14,padding:14,border:'1px solid var(--border)'}}>
+        <div style={{fontSize:10,color:'var(--muted)',letterSpacing:1,marginBottom:8,fontWeight:700}}>ALPACA ACCOUNT</div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10}}>
+          {[
+            {l:'Account',v:'PA31TORWGZC1'},{l:'Status',v:'ACTIVE'},
+            {l:'Equity',v:'$100,000'},{l:'Buying Power',v:'$200,000'},
+            {l:'Day Trades',v:'0'},{l:'PDT',v:'Nein'},
+          ].map((x,i)=>(
+            <div key={i}>
+              <div style={{fontSize:8,color:'var(--muted)',letterSpacing:.5}}>{x.l}</div>
+              <div style={{fontSize:11,fontWeight:600,color:'#f8fafc',marginTop:1}}>{x.v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  return(
+    <div>
+      <Header/>
+      {tab==='dash'&&<DashTab/>}
+      {tab==='chart'&&<ChartTab/>}
+      {tab==='signal'&&<SignalTab/>}
+      {tab==='sys'&&<SysTab/>}
+      <Nav/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
